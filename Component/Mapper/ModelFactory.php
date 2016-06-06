@@ -143,32 +143,11 @@
             $customer = new Shopware_Plugins_Frontend_RpayRatePay_Component_Model_SubModel_Customer();
 
             // set merchant customer id if available
-            if (null !== $shopUser->getBilling()->getNumber()) {
+            if (method_exists($shopUser->getBilling(), 'getNumber') && null !== $shopUser->getBilling()->getNumber()) {
                 $head->setMerchantConsumerId($shopUser->getBilling()->getNumber());
+            } elseif (method_exists($shopUser, 'getNumber') && null !== $shopUser->getNumber()) { // From Shopware 5.2 customer number is moved to customer object
+                $head->setMerchantConsumerId($shopUser->getNumber());
             }
-
-            $shopBillingAddress = $shopUser->getBilling();
-            $billingAddress = new Shopware_Plugins_Frontend_RpayRatePay_Component_Model_SubModel_Address();
-            $billingAddress->setFirstName($shopBillingAddress->getFirstName());
-            $billingAddress->setLastName($shopBillingAddress->getLastName());
-            $billingAddress->setCompany($shopBillingAddress->getCompany());
-            $billingAddress->setType('BILLING');
-            $billingAddress->setCountryCode($shopCountry->getIso());
-            $billingAddress->setCity($shopBillingAddress->getCity());
-            $billingAddress->setStreet($shopBillingAddress->getStreet());
-            $billingAddress->setZipCode($shopBillingAddress->getZipCode());
-            $customer->setBillingAddresses($billingAddress);
-
-
-            $shopShippingAddress = $shopUser->getShipping() !== null ? $shopUser->getShipping() : $shopUser->getBilling(
-            );
-            $shippingAddress = new Shopware_Plugins_Frontend_RpayRatePay_Component_Model_SubModel_Address();
-            $shippingAddress->setType('DELIVERY');
-            $shippingAddress->setCountryCode($shopCountry->getIso());
-            $shippingAddress->setCity($shopShippingAddress->getCity());
-            $shippingAddress->setStreet($shopShippingAddress->getStreet());
-            $shippingAddress->setZipCode($shopShippingAddress->getZipCode());
-            $customer->setShippingAddresses($shippingAddress);
 
             // only for elv and sepa elv
             if ($method === 'ELV') {
@@ -180,32 +159,62 @@
 
                 $customer->setBankAccount($bankAccount);
             }
-            $customer->setCompanyName($shopBillingAddress->getCompany());
-            $customer->setVatId($shopBillingAddress->getVatId());
-            $customer->setDateOfBirth($shopBillingAddress->getBirthday()->format('Y-m-d'));
-            $customer->setEmail($shopUser->getEmail());
-            $customer->setFirstName($shopBillingAddress->getFirstName());
-            $customer->setLastName($shopBillingAddress->getLastName());
 
+            $checkoutBillingAddressId = (isset(Shopware()->Session()->RatePAY['checkoutBillingAddressId'])) ? Shopware()->Session()->RatePAY['checkoutBillingAddressId'] : false;
+            $checkoutShippingAddressId = (isset(Shopware()->Session()->RatePAY['checkoutShippingAddressId'])) ? Shopware()->Session()->RatePAY['checkoutShippingAddressId'] : false;
+
+            // Checkout address ids are set from shopware version >=5.2.0
+            if ($checkoutBillingAddressId) {
+                $addressModel = Shopware()->Models()->getRepository('Shopware\Models\Customer\Address');
+                $checkoutAddressBilling = $addressModel->findOneBy(array('id' => $checkoutBillingAddressId));
+                $checkoutAddressShipping = $addressModel->findOneBy(array('id' => $checkoutShippingAddressId ? $checkoutShippingAddressId : $checkoutBillingAddressId));
+            } else {
+                $checkoutAddressBilling = $shopUser->getBilling();
+                $checkoutAddressShipping = $shopUser->getShipping() !== null ? $shopUser->getShipping() : $shopUser->getBilling();
+            }
+
+            $customer->setFirstName($checkoutAddressBilling->getFirstName());
+            $customer->setLastName($checkoutAddressBilling->getLastName());
+            $customer->setCompanyName($checkoutAddressBilling->getCompany());
+            $customer->setVatId($checkoutAddressBilling->getVatId());
+            $customer->setEmail($shopUser->getEmail());
+
+            // set merchant customer id if available
+            if (method_exists($shopUser->getBilling(), 'getBirthday') && null !== $shopUser->getBilling()->getBirthday()) {
+                $customer->setDateOfBirth($shopUser->getBilling()->getBirthday()->format("Y-m-d"));
+            } elseif (method_exists($shopUser, 'getBirthday') && null !== $shopUser->getBirthday()) { // From Shopware 5.2 date of birth is moved to customer object
+                $customer->setDateOfBirth($shopUser->getBirthday()->format("Y-m-d"));
+            }
 
             /**
              * set gender and salutation based on the given billingaddress salutation
              */
             $gender = 'U';
-            if ($shopBillingAddress->getSalutation() === 'mr') {
+            if ($checkoutAddressBilling->getSalutation() === 'mr') {
                 $gender = 'M';
                 $customer->setSalutation('Herr');
-            } elseif ($shopBillingAddress->getSalutation() === 'ms') {
+            } elseif ($checkoutAddressBilling->getSalutation() === 'ms') {
                 $gender = 'F';
                 $customer->setSalutation('Frau');
             } else {
-                $customer->setSalutation($shopBillingAddress->getSalutation());
+                $customer->setSalutation($checkoutAddressBilling->getSalutation());
             }
 
             $customer->setGender($gender);
-            $customer->setPhone($shopBillingAddress->getPhone());
+            $customer->setPhone($checkoutAddressBilling->getPhone());
             $customer->setNationality($shopCountry->getIso());
             $customer->setIpAddress($this->_getCustomerIP());
+
+            $customer->setBillingAddresses($this->_getCheckoutAddress(
+                $checkoutAddressBilling,
+                'BILLING',
+                $shopCountry->getIso()
+            ));
+            $customer->setShippingAddresses($this->_getCheckoutAddress(
+                $checkoutAddressShipping,
+                'DELIVERY',
+                $shopCountry->getIso()
+            ));
 
             $payment = new Shopware_Plugins_Frontend_RpayRatePay_Component_Model_SubModel_Payment();
             $payment->setAmount($this->getAmount());
@@ -437,6 +446,27 @@
             }
 
             return $customerIp;
+        }
+
+        /**
+         * Transfer checkout address to address model
+         *
+         * @param $checkoutAddress
+         * @param $type
+         * @param $country
+         * @return Shopware_Plugins_Frontend_RpayRatePay_Component_Model_SubModel_Address
+         */
+        function _getCheckoutAddress($checkoutAddress, $type, $country) {
+            $address = new Shopware_Plugins_Frontend_RpayRatePay_Component_Model_SubModel_Address();
+            $address->setType($type);
+            $address->setFirstName($checkoutAddress->getFirstName());
+            $address->setLastName($checkoutAddress->getLastName());
+            $address->setCompany($checkoutAddress->getCompany());
+            $address->setCity($checkoutAddress->getCity());
+            $address->setStreet($checkoutAddress->getStreet());
+            $address->setZipCode($checkoutAddress->getZipCode());
+            $address->setCountryCode($country);
+            return $address;
         }
 
         public function getProfileId(Shopware\Models\Customer\Customer $customer)
